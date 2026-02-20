@@ -1,30 +1,23 @@
 import os
-import logging
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InputFile
-)
+import threading
+from flask import Flask
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
-    ContextTypes,
     MessageHandler,
+    ContextTypes,
     filters,
 )
 
-# ================== ADD TOKEN HERE ==================
-TOKEN = "8549339978:AAGYWiZsMa8LJKRF0f95tZPkUewefpixvDc"
-# ====================================================
-
-ADMIN_CHAT_ID = 1891081482   # <-- put your numeric Telegram ID here
+# ================= CONFIG =================
+TOKEN = os.getenv("TOKEN")  # Token from Render environment variable
+ADMIN_CHAT_ID = 1891081482  # Your numeric Telegram ID
 UPI_ID = "aijazruler27@okaxis"
 ADMIN_USERNAME = "@aijazruler"
-
-QR_FILENAME = "upi.png"  # Make sure this file exists in root folder
-
+QR_FILE = "upi.png"
+# ==========================================
 
 PRODUCTS = {
     "🎧 Spotify Panel Root": ["7 Days — $3.80", "15 Days — $5.50", "30 Days — $10.00", "60 Days — $20.00"],
@@ -36,50 +29,35 @@ PRODUCTS = {
     "⭐ Prime APK Mod": ["5 Days — $3.00", "10 Days — $5.00"]
 }
 
-
-# ================= START =================
+# ================= TELEGRAM BOT =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton(product, callback_data=f"product|{product}")]
-        for product in PRODUCTS.keys()
-    ]
-
+    keyboard = [[InlineKeyboardButton(p, callback_data=f"prod|{p}")]
+                for p in PRODUCTS.keys()]
     await update.message.reply_text(
-        "🔥 Welcome to Premium Panel Store!\n\nSelect Product:",
+        "🔥 Select Product:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-
-# ================= PRODUCT SELECT =================
-
-async def product_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def product_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    product = query.data.split("|")[1]
+    context.user_data["product"] = product
 
-    _, product_name = query.data.split("|", 1)
-    context.user_data["product"] = product_name
-
-    keyboard = [
-        [InlineKeyboardButton(duration, callback_data=f"duration|{duration}")]
-        for duration in PRODUCTS[product_name]
-    ]
+    keyboard = [[InlineKeyboardButton(d, callback_data=f"dur|{d}")]
+                for d in PRODUCTS[product]]
 
     await query.edit_message_text(
-        f"✅ Selected: {product_name}\n\nChoose Duration:",
+        f"✅ Selected: {product}\n\nSelect Duration:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-
-# ================= DURATION SELECT =================
-
-async def duration_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def duration_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    _, duration = query.data.split("|", 1)
-
-    # 🔥 Auto price detection
+    duration = query.data.split("|")[1]
     price = duration.split("$")[1].strip()
 
     context.user_data["duration"] = duration
@@ -87,61 +65,55 @@ async def duration_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     product = context.user_data["product"]
 
-    caption_text = (
+    caption = (
         f"🛒 Product: {product}\n"
         f"⏳ Duration: {duration}\n"
         f"💰 Amount: ${price}\n\n"
         f"🏦 UPI ID: {UPI_ID}\n\n"
-        f"📌 Scan QR or Pay Manually\n"
-        f"📸 After payment, send screenshot here.\n\n"
-        f"⚠ After payment mention {ADMIN_USERNAME}"
+        f"📸 Send payment screenshot after paying.\n"
+        f"⚠ Mention {ADMIN_USERNAME} after payment."
     )
 
-    # Send QR Image
-    if os.path.exists(QR_FILENAME):
-        with open(QR_FILENAME, "rb") as photo:
-            await query.message.reply_photo(photo=photo, caption=caption_text)
+    if os.path.exists(QR_FILE):
+        with open(QR_FILE, "rb") as photo:
+            await query.message.reply_photo(photo=photo, caption=caption)
     else:
-        await query.message.reply_text("❌ QR file 'upi.png' not found in root folder.")
-
-# ================= SCREENSHOT HANDLER =================
+        await query.message.reply_text("QR file not found.")
 
 async def screenshot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
-
     product = context.user_data.get("product", "Unknown")
     duration = context.user_data.get("duration", "Unknown")
     price = context.user_data.get("price", "Unknown")
 
-    caption = (
-        f"📥 New Payment Screenshot\n\n"
-        f"👤 User: @{user.username}\n"
-        f"🛒 Product: {product}\n"
-        f"⏳ Duration: {duration}\n"
-        f"💰 Amount: ${price}"
-    )
-
     await update.message.forward(chat_id=ADMIN_CHAT_ID)
-    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=caption)
-
-    await update.message.reply_text(
-        "✅ Screenshot received!\n⏳ Admin will verify soon."
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=f"📥 New Payment\nUser: @{user.username}\nProduct: {product}\nDuration: {duration}\nAmount: ${price}"
     )
 
+    await update.message.reply_text("✅ Screenshot sent to admin.")
 
-# ================= MAIN =================
-
-def main():
+def run_bot():
     app = ApplicationBuilder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(product_selected, pattern="^product"))
-    app.add_handler(CallbackQueryHandler(duration_selected, pattern="^duration"))
+    app.add_handler(CallbackQueryHandler(product_handler, pattern="^prod"))
+    app.add_handler(CallbackQueryHandler(duration_handler, pattern="^dur"))
     app.add_handler(MessageHandler(filters.PHOTO, screenshot_handler))
-
-    print("Bot running...")
     app.run_polling()
 
+# ================= FLASK SERVER FOR RENDER =================
 
-if __name__ == "__main__":
-    main()
+flask_app = Flask(__name__)
+
+@flask_app.route("/")
+def home():
+    return "Bot is running!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    flask_app.run(host="0.0.0.0", port=port)
+
+# Run both
+threading.Thread(target=run_bot).start()
+run_web()
